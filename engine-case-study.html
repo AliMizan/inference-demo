@@ -629,10 +629,10 @@ const SITE = {
   //   kind: "vimeo",   src: "VIDEO_ID"       (the number in a Vimeo link)
   //   kind: "file",    src: "demo.mp4", poster: "poster.jpg"   (a file next to this page)
   //   kind: "none"     shows a placeholder
-  video: { kind: "none", src: "", poster: "" },
+  video: { kind: "file", src: "demo.mp4", poster: "poster.jpg" },
 
   // One line under the video describing what it shows.
-  videoNote: "What you will see: a streamed reply, then a follow-up turn that prefills only the new tokens."
+  videoNote: "A live chat session in the terminal: a reply streams out, then a follow-up turn reuses the cached conversation. The status line under each reply shows how many tokens were reused and how many pages are in use."
 };
 /* ==================================== */
 
@@ -658,6 +658,12 @@ document.querySelectorAll("[data-repo]").forEach(a => {
     const vid = document.createElement("video");
     vid.controls = true; vid.preload = "metadata"; vid.src = v.src;
     if (v.poster) vid.poster = v.poster;
+    vid.setAttribute("playsinline", "");
+    vid.setAttribute("aria-label", "Engine demo video");
+    // match the frame to the video's own shape so there are no black bars
+    vid.addEventListener("loadedmetadata", () => {
+      if (vid.videoWidth && vid.videoHeight) f.style.aspectRatio = vid.videoWidth + " / " + vid.videoHeight;
+    });
     f.appendChild(vid);
   } else {
     f.innerHTML = '<div class="video-empty"><div class="tri" aria-hidden="true"></div><strong>Demo video goes here</strong><span>Set <code>SITE.video</code> at the top of the script in this file.</span></div>';
