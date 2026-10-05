@@ -1,0 +1,889 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paged KV-Cache Inference Engine</title>
+<meta name="description" content="Qwen2.5-Coder-1.5B on a 6 GB RTX 4050 through a paged KV cache, attention path, decode loop and sampler written from scratch in PyTorch.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0c1a21;
+  --bg2:#102530;
+  --bg3:#143040;
+  --line:#24404c;
+  --ink:#e7eff1;
+  --mute:#93aab2;
+  --amber:#f0b44c;
+  --aqua:#62d2c6;
+  --coral:#ee7b6b;
+  --display:"Bricolage Grotesque","Segoe UI",system-ui,sans-serif;
+  --body:"Newsreader",Georgia,"Times New Roman",serif;
+  --code:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+  --wrap:1080px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--body);font-size:19px;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--aqua);text-underline-offset:3px}
+a:hover{color:#fff}
+:focus-visible{outline:2px solid var(--amber);outline-offset:3px;border-radius:4px}
+.wrap{max-width:var(--wrap);margin:0 auto;padding:0 24px}
+p{margin:0 0 1em;max-width:64ch}
+h1,h2,h3{font-family:var(--display);line-height:1.1;margin:0;letter-spacing:-0.02em}
+h2{font-size:clamp(30px,4.4vw,44px);font-weight:800;margin-bottom:18px}
+h3{font-size:22px;font-weight:700;margin-bottom:8px}
+code,pre{font-family:var(--code);font-size:14px}
+.lede{color:var(--mute);font-size:21px;max-width:58ch}
+section{padding:96px 0 0}
+section:last-of-type{padding-bottom:96px}
+
+/* header */
+header.top{position:sticky;top:0;z-index:20;background:rgba(12,26,33,.88);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+header.top .wrap{display:flex;align-items:center;justify-content:space-between;height:56px;gap:16px}
+.brand{font-family:var(--display);font-weight:700;font-size:17px;color:var(--ink);text-decoration:none}
+nav{display:flex;gap:20px;overflow-x:auto;scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+nav a{color:var(--mute);text-decoration:none;font-family:var(--display);font-size:15px;white-space:nowrap}
+nav a:hover{color:var(--ink)}
+
+/* hero */
+.hero{padding-top:72px}
+.hero h1{font-size:clamp(40px,7.2vw,84px);font-weight:800;max-width:15ch}
+.hero .lede{margin-top:22px}
+.hero-actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:28px}
+.btn{display:inline-block;font-family:var(--display);font-weight:700;font-size:16px;padding:12px 20px;border-radius:8px;text-decoration:none;border:1px solid var(--line);color:var(--ink);background:transparent;cursor:pointer}
+.btn:hover{border-color:var(--mute);color:#fff}
+.btn.primary{background:var(--amber);border-color:var(--amber);color:#1a1405}
+.btn.primary:hover{background:#ffc766;color:#1a1405}
+
+.pool{margin-top:56px;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:24px}
+.pool-head{display:flex;flex-wrap:wrap;gap:12px 24px;justify-content:space-between;align-items:baseline;margin-bottom:18px}
+.pool-head strong{font-family:var(--display);font-size:18px}
+.pool-stats{font-family:var(--code);font-size:13px;color:var(--mute)}
+.pool-stats b{color:var(--ink);font-weight:600}
+.pages{display:grid;grid-template-columns:repeat(6,1fr);gap:14px}
+.page{border:1px dashed var(--line);border-radius:10px;padding:10px;transition:border-color .3s, background .3s}
+.page.on{border:1px solid var(--amber);background:rgba(240,180,76,.06)}
+.page-label{font-family:var(--code);font-size:11px;color:var(--mute);margin-bottom:8px;display:flex;justify-content:space-between}
+.page.on .page-label{color:var(--amber)}
+.slots{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
+.slot{aspect-ratio:1;border-radius:3px;background:var(--bg3)}
+.slot.pre{background:var(--aqua)}
+.slot.dec{background:var(--amber)}
+.table-row{display:grid;grid-template-columns:auto repeat(6,1fr);gap:14px;margin-top:16px;font-family:var(--code);font-size:12px;align-items:center}
+.table-row span:first-child{color:var(--mute)}
+.table-row .cell{text-align:center;padding:4px 0;border-radius:5px;background:var(--bg3);color:var(--mute)}
+.table-row .cell.on{background:rgba(240,180,76,.16);color:var(--amber)}
+.pool-foot{display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center;justify-content:space-between;margin-top:18px;font-size:15px;color:var(--mute)}
+.key{display:inline-flex;align-items:center;gap:6px;margin-right:14px}
+.key i{width:11px;height:11px;border-radius:3px;display:inline-block}
+.replay{background:none;border:1px solid var(--line);color:var(--ink);font-family:var(--display);font-size:14px;padding:6px 12px;border-radius:7px;cursor:pointer}
+.replay:hover{border-color:var(--mute)}
+@media (max-width:760px){
+  .pages{grid-template-columns:repeat(3,1fr)}
+  .table-row{grid-template-columns:auto repeat(3,1fr)}
+  .table-row .cell:nth-child(n+5){display:none}
+}
+
+/* video */
+.video-frame{position:relative;aspect-ratio:16/9;background:var(--bg2);border:1px solid var(--line);border-radius:14px;overflow:hidden;margin-top:24px}
+.video-frame iframe,.video-frame video{position:absolute;inset:0;width:100%;height:100%;border:0;background:#000}
+.video-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;text-align:center;padding:24px;color:var(--mute)}
+.video-empty .tri{width:0;height:0;border-left:26px solid var(--amber);border-top:16px solid transparent;border-bottom:16px solid transparent;opacity:.8}
+.video-empty strong{font-family:var(--display);color:var(--ink);font-size:20px}
+.video-note{margin-top:14px;color:var(--mute);font-size:16px}
+
+/* architecture */
+.arch{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px;margin-top:32px;align-items:start}
+.legend{display:flex;flex-wrap:wrap;gap:8px 20px;font-size:15px;color:var(--mute);margin-top:6px}
+.flow{display:flex;flex-direction:column;gap:0}
+.node{all:unset;box-sizing:border-box;display:block;cursor:pointer;width:100%;padding:11px 14px;border-radius:9px;border:1px solid var(--line);background:var(--bg2);font-family:var(--display);font-size:16px;font-weight:500;position:relative}
+.node small{display:block;font-family:var(--code);font-size:11.5px;color:var(--mute);font-weight:400;margin-top:2px}
+.node.mine{border-left:4px solid var(--amber)}
+.node.hf{border-left:4px solid var(--aqua)}
+.node:hover{background:var(--bg3)}
+.node[aria-pressed="true"]{background:var(--bg3);border-color:var(--mute)}
+.node:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+.link{height:14px;margin-left:24px;border-left:2px solid var(--line)}
+.loop{border:1px dashed var(--mute);border-radius:12px;padding:12px;display:flex;flex-direction:column}
+.loop-label{font-family:var(--code);font-size:12px;color:var(--mute);margin-bottom:10px}
+.detail{position:sticky;top:76px;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:24px;min-height:260px}
+.detail h3{margin-bottom:4px}
+.tag{display:inline-block;font-family:var(--code);font-size:12px;padding:2px 8px;border-radius:5px;margin-bottom:14px}
+.tag.mine{background:rgba(240,180,76,.16);color:var(--amber)}
+.tag.hf{background:rgba(98,210,198,.14);color:var(--aqua)}
+.detail p{font-size:17.5px}
+.detail code{background:var(--bg3);padding:1px 6px;border-radius:4px}
+@media (max-width:860px){.arch{grid-template-columns:1fr}.detail{position:static}}
+
+/* memory */
+.mem{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px;margin-top:32px;align-items:start}
+.card{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:24px}
+pre.layout{margin:0;overflow-x:auto;color:var(--ink);line-height:1.7}
+pre.layout .c{color:var(--mute)}
+.ctl{display:flex;flex-wrap:wrap;gap:14px 24px;align-items:center;margin-bottom:16px;font-family:var(--display);font-size:15px}
+.ctl label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+input[type=range]{width:100%;accent-color:var(--amber);margin:6px 0 4px}
+.range-val{font-family:var(--code);font-size:13px;color:var(--mute);display:flex;justify-content:space-between}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px}
+.stat{background:var(--bg3);border-radius:10px;padding:12px 14px}
+.stat b{display:block;font-family:var(--display);font-size:26px;font-weight:700;line-height:1.1}
+.stat span{font-size:14px;color:var(--mute)}
+.lastpage{margin-top:18px}
+.lastpage .slots{grid-template-columns:repeat(16,1fr);gap:3px;margin-top:8px}
+.lastpage .slot.dec{background:var(--amber)}
+.lastpage p{font-size:15px;color:var(--mute);margin:0}
+table{border-collapse:collapse;width:100%;font-size:16px;margin-top:26px}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}
+th{font-family:var(--display);font-weight:700;color:var(--mute);font-size:14px}
+td:last-child{font-family:var(--code);font-size:14px;text-align:right}
+th:last-child{text-align:right}
+@media (max-width:860px){.mem{grid-template-columns:1fr}.stats{grid-template-columns:1fr}}
+
+/* benchmark */
+.bench{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px;margin-top:32px}
+.chart h3{font-size:19px}
+.chart .hint{font-size:15px;color:var(--mute);margin-bottom:18px}
+.bar-row{display:grid;grid-template-columns:96px 1fr;gap:12px;align-items:center;margin-bottom:12px;font-family:var(--display);font-size:15px}
+.track{background:var(--bg3);border-radius:6px;height:34px;position:relative;overflow:hidden}
+.fill{height:100%;border-radius:6px;display:flex;align-items:center;justify-content:flex-end;padding-right:10px;font-family:var(--code);font-size:13px;font-weight:600;color:#10181c;width:0;transition:width 1s cubic-bezier(.2,.8,.2,1)}
+.fill.me{background:var(--amber)}
+.fill.hf{background:var(--aqua)}
+.bench-notes{margin-top:24px}
+.bench-notes p{color:var(--mute);font-size:17px}
+.bench-notes strong{color:var(--ink);font-weight:500}
+@media (max-width:860px){.bench{grid-template-columns:1fr}}
+
+/* bugs */
+.bug{background:var(--bg2);border:1px solid var(--line);border-radius:14px;margin-top:20px}
+.bug summary{list-style:none;cursor:pointer;padding:22px 24px;display:flex;justify-content:space-between;gap:16px;align-items:flex-start}
+.bug summary::-webkit-details-marker{display:none}
+.bug summary h3{margin:0 0 4px}
+.bug summary p{margin:0;color:var(--mute);font-size:17px}
+.chev{flex:none;width:28px;height:28px;border:1px solid var(--line);border-radius:50%;position:relative;margin-top:2px;transition:transform .25s}
+.chev::before,.chev::after{content:"";position:absolute;left:50%;top:50%;width:10px;height:2px;background:var(--mute);transform:translate(-50%,-50%)}
+.chev::after{transform:translate(-50%,-50%) rotate(90deg);transition:opacity .2s}
+.bug[open] .chev::after{opacity:0}
+.bug-body{padding:0 24px 24px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:28px;border-top:1px solid var(--line);padding-top:22px}
+.bug-body h4{font-family:var(--display);font-size:16px;margin:0 0 4px;color:var(--amber)}
+.bug-body p{font-size:17px;margin-bottom:16px}
+.bug-body code{background:var(--bg3);padding:1px 6px;border-radius:4px}
+.mask{display:grid;gap:3px;margin:8px 0 6px}
+.mask i{aspect-ratio:1;border-radius:3px;background:var(--bg3)}
+.mask i.ok{background:var(--aqua)}
+.mask i.bad{background:var(--coral)}
+.mask-cap{font-size:14px;color:var(--mute);margin:0}
+.mask-pair{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:860px){.bug-body{grid-template-columns:1fr}}
+
+/* limits */
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px;margin-top:28px}
+.two ul,.two ol{margin:0;padding-left:1.2em}
+.two li{margin-bottom:.7em;font-size:18px}
+.two li span{color:var(--mute)}
+.honest{border-left:3px solid var(--amber);padding:4px 0 4px 18px;margin:0 0 28px;max-width:70ch}
+@media (max-width:860px){.two{grid-template-columns:1fr}}
+
+/* commands */
+.cmd{position:relative;background:var(--bg2);border:1px solid var(--line);border-radius:10px;margin-bottom:12px}
+.cmd pre{margin:0;padding:14px 84px 14px 16px;overflow-x:auto;white-space:pre}
+.cmd button{position:absolute;right:10px;top:10px;font-family:var(--display);font-size:13px;background:var(--bg3);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer}
+.cmd button:hover{border-color:var(--mute)}
+.cmd-title{font-family:var(--display);font-weight:700;font-size:16px;margin:22px 0 8px}
+
+footer{border-top:1px solid var(--line);padding:28px 0 48px;color:var(--mute);font-size:16px}
+
+/* ---------- navigation state ---------- */
+nav a{padding:8px 0;border-bottom:2px solid transparent}
+nav a.active{color:var(--ink);border-bottom-color:var(--amber)}
+section[id]{scroll-margin-top:72px}
+
+/* ---------- responsive: base guards ---------- */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{overflow-x:hidden}
+img,video,iframe,svg{max-width:100%}
+.card,.pool,.detail,.bug,.cmd{min-width:0}
+.stat b{font-size:clamp(20px,2.4vw,26px)}
+
+/* large and extra-large screens */
+@media (min-width:1400px){
+  :root{--wrap:1200px}
+  body{font-size:20px}
+}
+@media (min-width:1800px){
+  :root{--wrap:1320px}
+  body{font-size:21px}
+  .lede{font-size:23px}
+}
+
+/* laptops and small desktops */
+@media (max-width:1100px){
+  .wrap{padding:0 22px}
+  section{padding-top:80px}
+  .mem{grid-template-columns:1fr}
+}
+
+/* tablets */
+@media (min-width:561px) and (max-width:860px){
+  .stats{grid-template-columns:repeat(3,1fr)}
+}
+@media (max-width:860px){
+  .hero h1{max-width:none}
+  .bench{grid-template-columns:1fr}
+  .pool{padding:20px}
+}
+
+/* phones */
+@media (max-width:620px){
+  .brand{display:none}
+  header.top .wrap{height:52px}
+  nav{width:100%;gap:22px;-webkit-overflow-scrolling:touch}
+  nav a{padding:12px 0}
+}
+@media (max-width:560px){
+  body{font-size:17px;line-height:1.55}
+  .wrap{padding:0 16px}
+  .lede{font-size:18px}
+  section{padding-top:60px}
+  section:last-of-type{padding-bottom:60px}
+  .hero{padding-top:36px}
+  .hero-actions{gap:10px}
+  .hero-actions .btn{flex:1 1 auto;text-align:center}
+  h2{margin-bottom:14px}
+  h3{font-size:20px}
+  .pool{margin-top:36px;padding:16px;border-radius:12px}
+  .pool-head{gap:6px}
+  .pool-head strong{font-size:16px}
+  .pages{gap:10px}
+  .page{padding:8px}
+  .table-row{gap:8px}
+  .pool-foot{font-size:14px}
+  .key{margin-right:10px}
+  .video-note{font-size:15px}
+  .arch,.mem,.bench,.two{margin-top:24px;gap:20px}
+  .node{padding:10px 12px;font-size:15px}
+  .loop{padding:10px}
+  .detail{padding:18px;min-height:0}
+  .detail p{font-size:16.5px}
+  .card{padding:18px;border-radius:12px}
+  .stats{grid-template-columns:1fr}
+  .stat{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+  .stat b{display:inline}
+  th,td{padding:9px 8px}
+  td,th{font-size:15px}
+  .bar-row{grid-template-columns:78px 1fr;gap:10px;font-size:14px}
+  .track{height:30px}
+  .fill{font-size:12px}
+  .bench-notes p{font-size:16px}
+  .bug summary{padding:18px}
+  .bug summary p{font-size:16px}
+  .bug-body{padding:18px;gap:20px}
+  .bug-body p{font-size:16px}
+  .mask-pair{gap:12px}
+  .mask-cap{font-size:13px}
+  .two li{font-size:16.5px}
+  .honest{padding-left:14px}
+  .cmd{display:flex;flex-direction:column}
+  .cmd pre{padding:12px;font-size:12.5px}
+  .cmd button{position:static;align-self:flex-end;margin:0 10px 10px 0;padding:6px 12px}
+  .cmd-title{margin-top:18px}
+  footer{font-size:15px}
+}
+@media (max-width:360px){
+  .pages{grid-template-columns:repeat(2,1fr)}
+  .table-row{grid-template-columns:auto repeat(2,1fr)}
+  .table-row .cell:nth-child(n+4){display:none}
+  .lastpage .slots{grid-template-columns:repeat(8,1fr)}
+}
+
+/* short landscape phones: don't let the sticky panel cover the view */
+@media (max-height:520px){
+  .detail{position:static}
+  header.top{position:static}
+}
+
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *{transition:none!important}
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top">Paged KV-Cache Engine</a>
+    <nav aria-label="Sections">
+      <a href="#demo">Demo</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#memory">Memory</a>
+      <a href="#benchmark">Benchmark</a>
+      <a href="#bugs">Bugs</a>
+      <a href="#scope">Scope</a>
+      <a href="#run">Run it</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- 1. HERO -->
+<section class="hero">
+  <div class="wrap">
+    <h1>A paged KV cache, written from scratch.</h1>
+    <p class="lede">Qwen2.5-Coder-1.5B running on a 6 GB RTX 4050. The cache, attention path, decode loop, sampler and multi-turn cache reuse are my own PyTorch code, checked against Hugging Face.</p>
+    <div class="hero-actions">
+      <a class="btn primary" href="#demo">Watch the demo</a>
+      <a class="btn" data-repo href="#run">View the code</a>
+    </div>
+
+    <div class="pool" aria-label="Animation of tokens filling cache pages">
+      <div class="pool-head">
+        <strong>Tokens fill pages, pages come from a pool</strong>
+        <div class="pool-stats" aria-live="off">tokens <b id="hTok">0</b> &nbsp; pages in use <b id="hPg">0</b> of 6</div>
+      </div>
+      <div class="pages" id="pages"></div>
+      <div class="table-row" id="tableRow"></div>
+      <div class="pool-foot">
+        <div>
+          <span class="key"><i style="background:var(--aqua)"></i>prefill (whole prompt at once)</span>
+          <span class="key"><i style="background:var(--amber)"></i>decode (one token per step)</span>
+        </div>
+        <button class="replay" id="replay" type="button">Replay</button>
+      </div>
+    </div>
+    <p style="margin-top:14px;color:var(--mute);font-size:16px;max-width:none">Each page holds 16 tokens. Pages are handed out in any order, and the block table maps a sequence's logical pages to physical ones.</p>
+  </div>
+</section>
+
+<!-- 9. VIDEO -->
+<section id="demo">
+  <div class="wrap">
+    <h2>Demo</h2>
+    <p class="lede">A short run of the engine generating code, then answering a follow-up without recomputing the earlier conversation.</p>
+    <div class="video-frame" id="videoFrame"></div>
+    <p class="video-note" id="videoNote"></p>
+  </div>
+</section>
+
+<!-- 2. ARCHITECTURE -->
+<section id="architecture">
+  <div class="wrap">
+    <h2>How one token moves through the engine</h2>
+    <p class="lede">Select any step. Amber marks code I wrote; teal marks layers borrowed from Hugging Face.</p>
+    <div class="legend">
+      <span class="key"><i style="background:var(--amber)"></i>written here</span>
+      <span class="key"><i style="background:var(--aqua)"></i>from Hugging Face</span>
+    </div>
+    <div class="arch">
+      <div class="flow" id="flow">
+        <button class="node hf" data-id="tok" aria-pressed="true">Tokenizer<small>prompt text → input_ids</small></button>
+        <div class="link"></div>
+        <button class="node mine" data-id="engine" aria-pressed="false">PagedQwenEngine.generate<small>prefill, then decode loop</small></button>
+        <div class="link"></div>
+        <div class="loop">
+          <div class="loop-label">repeat for each of the 28 layers</div>
+          <button class="node hf" data-id="proj" aria-pressed="false">RMSNorm, q/k/v projections</button>
+          <div class="link"></div>
+          <button class="node mine" data-id="rope" aria-pressed="false">RoPE on q and k<small>tables from HF, applied here</small></button>
+          <div class="link"></div>
+          <button class="node mine" data-id="write" aria-pressed="false">cache.write<small>K,V into pages</small></button>
+          <div class="link"></div>
+          <button class="node mine" data-id="attn" aria-pressed="false">paged_attention<small>gather → repeat_kv → SDPA</small></button>
+          <div class="link"></div>
+          <button class="node hf" data-id="mlp" aria-pressed="false">o_proj, MLP</button>
+        </div>
+        <div class="link"></div>
+        <button class="node mine" data-id="commit" aria-pressed="false">cache.commit<small>once per step, after all layers</small></button>
+        <div class="link"></div>
+        <button class="node hf" data-id="head" aria-pressed="false">Final norm, LM head<small>last position only</small></button>
+        <div class="link"></div>
+        <button class="node mine" data-id="sample" aria-pressed="false">sample_next<small>penalty, temperature, top-k, top-p</small></button>
+        <div class="link"></div>
+        <button class="node mine" data-id="stream" aria-pressed="false">Stream text, loop<small>until end-of-sequence or max tokens</small></button>
+      </div>
+      <aside class="detail" id="detail" aria-live="polite"></aside>
+    </div>
+  </div>
+</section>
+
+<!-- 3. MEMORY -->
+<section id="memory">
+  <div class="wrap">
+    <h2>What the cache costs in memory</h2>
+    <p class="lede">The cache is one set of preallocated tensors per layer. A page holds the keys and values of 16 consecutive tokens, and one page id means the same index in every layer.</p>
+
+    <div class="mem">
+      <div class="card">
+        <pre class="layout"><span class="c"># per layer</span>
+k_pages, v_pages
+  [num_pages, num_kv_heads, page_size, head_dim]
+
+<span class="c"># int8 mode only</span>
+k_scale, v_scale
+  [num_pages, num_kv_heads, 1, 1]
+
+<span class="c"># per sequence slot b</span>
+block_table[b, i]  <span class="c">physical page of logical page i, or -1</span>
+seq_len[b]         <span class="c">committed tokens</span></pre>
+        <table>
+          <tr><th>Qwen2.5-Coder-1.5B</th><th>Value</th></tr>
+          <tr><td>Layers</td><td>28</td></tr>
+          <tr><td>Query heads / KV heads</td><td>12 / 2</td></tr>
+          <tr><td>Head dimension</td><td>128</td></tr>
+          <tr><td>One page, one layer, fp16</td><td>16 KiB</td></tr>
+          <tr><td>One page id, all layers, fp16</td><td>448 KiB</td></tr>
+          <tr><td>Per token, fp16</td><td>~28 KB</td></tr>
+          <tr><td>Per token, int8</td><td>~14 KB</td></tr>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="ctl" role="radiogroup" aria-label="Cache precision">
+          <label><input type="radio" name="prec" value="fp16" checked> fp16 cache</label>
+          <label><input type="radio" name="prec" value="int8"> int8 cache</label>
+        </div>
+        <label for="tokRange" style="font-family:var(--display);font-size:15px">Tokens in the cache</label>
+        <input id="tokRange" type="range" min="1" max="4096" value="548" step="1">
+        <div class="range-val"><span>1</span><span id="tokVal">548 tokens</span><span>4096</span></div>
+        <div class="stats">
+          <div class="stat"><b id="sPages">35</b><span>pages in use</span></div>
+          <div class="stat"><b id="sMem">15.3 MiB</b><span>cache memory</span></div>
+          <div class="stat"><b id="sSlots">12</b><span>empty slots in last page</span></div>
+        </div>
+        <div class="lastpage">
+          <p>The last page, slot by slot</p>
+          <div class="slots" id="lastSlots"></div>
+        </div>
+        <p style="margin:18px 0 0;font-size:16px;color:var(--mute)">Memory counts whole pages, so at most 15 slots are ever wasted per sequence. The default pool is about 115 MiB in fp16, small next to the roughly 3 GB of weights. 548 tokens is the cached length from the chat-reuse run.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 4. BENCHMARK -->
+<section id="benchmark">
+  <div class="wrap">
+    <h2>Speed against Hugging Face generate</h2>
+    <p class="lede">Same model, same GPU: RTX 4050, fp16, 128-token prompt, 128 new tokens, median of 3 runs.</p>
+    <div class="bench">
+      <div class="card chart" id="chartDecode">
+        <h3>Decode speed</h3>
+        <div class="hint">tokens per second, higher is better</div>
+        <div class="bar-row"><span>This engine</span><div class="track"><div class="fill me" data-v="30.7" data-max="35">30.7</div></div></div>
+        <div class="bar-row"><span>HF generate</span><div class="track"><div class="fill hf" data-v="31.9" data-max="35">31.9</div></div></div>
+      </div>
+      <div class="card chart" id="chartPrefill">
+        <h3>Prefill time</h3>
+        <div class="hint">milliseconds, lower is better</div>
+        <div class="bar-row"><span>This engine</span><div class="track"><div class="fill me" data-v="42.7" data-max="50">42.7</div></div></div>
+        <div class="bar-row"><span>HF generate</span><div class="track"><div class="fill hf" data-v="39.5" data-max="50">39.5</div></div></div>
+      </div>
+    </div>
+    <div class="bench-notes">
+      <p><strong>Where it lands.</strong> Decode is about 4% slower and prefill about 8% slower than Hugging Face. That gap is the price of the simple design: every layer gathers pages into contiguous K and V before attention. This stage was built for correctness first, and it is the base for batching and a paged-attention kernel.</p>
+      <p><strong>Chat reuse.</strong> In a multi-turn run, turn 2 reused 548 cached tokens and prefilled only 15 new ones, then generated 651 tokens in 23.15 s, about 28 tok/s overall. The time saved against <code>--no-reuse</code> has not been measured yet.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 5. BUGS -->
+<section id="bugs">
+  <div class="wrap">
+    <h2>Bugs the tests caught</h2>
+    <p class="lede">Two bugs that would have produced plausible but wrong output. Both were found by tests, not by reading generated text.</p>
+
+    <details class="bug" open>
+      <summary>
+        <div>
+          <h3>Stale data in reused int8 pages</h3>
+          <p>A new sequence inherited a scale from the previous one and came out corrupted.</p>
+        </div>
+        <span class="chev" aria-hidden="true"></span>
+      </summary>
+      <div class="bug-body">
+        <div>
+          <h4>What happened</h4>
+          <p>Freeing a sequence returns its pages to the pool but does not erase them. In int8 mode each page has one scale set by its largest value. A reused page still held the old sequence's values, so the scale came out too large and the new sequence was quantized too coarsely. The lifecycle test showed an error of 1.294.</p>
+          <h4>How it was found</h4>
+          <p>The free-then-reuse case in <code>test_cache_lifecycle.py</code> compared the reused cache against a dense reference.</p>
+        </div>
+        <div>
+          <h4>The fix</h4>
+          <p><code>_reset_page</code> now zeroes the page and resets its scales to 1 every time a page is handed out. <code>truncate</code> also zeroes the leftover slots of the last kept page, so a shortened sequence cannot leak old values into its scale.</p>
+          <h4>What it taught</h4>
+          <p>Any cache that reuses memory needs to treat "free" and "clean" as different states. In float modes stale slots are overwritten before they are read. With per-page scales they are not harmless.</p>
+        </div>
+      </div>
+    </details>
+
+    <details class="bug">
+      <summary>
+        <div>
+          <h3>Follow-up chunks could see the future</h3>
+          <p>With a cached prefix, new tokens were allowed to attend to tokens after them.</p>
+        </div>
+        <span class="chev" aria-hidden="true"></span>
+      </summary>
+      <div class="bug-body">
+        <div>
+          <h4>What happened</h4>
+          <p>Attention has three cases. A full prefill uses <code>is_causal=True</code>. A single decode token needs no mask. A follow-up chunk, with <code>1 &lt; T_q &lt; S</code> (several new queries against a longer cache), fell through to the wrong handling, so a query could attend to keys that come after it in the chunk.</p>
+          <h4>The fix</h4>
+          <p>An offset boolean mask: query <code>i</code> may see keys up to position <code>S - T_q + i</code>. This was fixed before chat reuse was added, since reuse is exactly what produces these chunks.</p>
+        </div>
+        <div>
+          <h4>The mask, with 3 new queries and 7 keys</h4>
+          <div class="mask-pair">
+            <div>
+              <div class="mask" id="maskBad" style="grid-template-columns:repeat(7,1fr)"></div>
+              <p class="mask-cap">Before: red cells are keys a query should not see.</p>
+            </div>
+            <div>
+              <div class="mask" id="maskOk" style="grid-template-columns:repeat(7,1fr)"></div>
+              <p class="mask-cap">After: each row sees its own past only.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+  </div>
+</section>
+
+<!-- 6. SCOPE -->
+<section id="scope">
+  <div class="wrap">
+    <h2>What is mine, what is not, and what is next</h2>
+    <p class="honest">The cache, attention, generation loop, sampling, chat reuse, tests and benchmark are written here. Weights, embeddings, RMSNorm, MLP, projections and the RoPE tables come from Hugging Face layers. One sequence runs at a time.</p>
+
+    <div class="two">
+      <div>
+        <h3>Limitations today</h3>
+        <ul>
+          <li>One sequence at a time. <span>Write and gather take a single slot.</span></li>
+          <li>Gather copies the whole cache every layer and step. <span>Long contexts slow down.</span></li>
+          <li>int8 uses one coarse scale per page. <span>An outlier sets the step size for the block.</span></li>
+          <li>No stop strings and no automatic dropping of old chat turns.</li>
+          <li>A failure mid-step leaves pending tokens set until <code>/reset</code>.</li>
+          <li>Open item: <span>an HF comparison matched 40 of 51 tokens, splitting after 5 generated tokens. Likely an fp16 near-tie, not yet proven. A teacher-forced logit check is the next step.</span></li>
+          <li>The follow-up test suite is written but its result is not yet confirmed.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Roadmap</h3>
+        <ol>
+          <li>Run the logit check and follow-up tests, and measure chat reuse against <code>--no-reuse</code>.</li>
+          <li>Benchmark 2048-token prompts to measure the cost of gather.</li>
+          <li>Batched decode, tested so a batch matches each sequence run alone.</li>
+          <li>A scheduler: request queue, continuous batching, admission by free pages, preemption.</li>
+          <li>Prefix caching across requests, a paged-attention kernel, CUDA graphs, an OpenAI-compatible API server.</li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 7. RUN IT -->
+<section id="run">
+  <div class="wrap">
+    <h2>Run it yourself</h2>
+    <p class="lede">The code lives in the repository below. Everything runs from the project root.</p>
+    <div class="hero-actions" style="margin-top:0;margin-bottom:8px">
+      <a class="btn primary" data-repo href="#run" rel="noopener">Open the repository</a>
+    </div>
+
+    <div class="cmd-title">Generate</div>
+    <div class="cmd"><pre>python -m engine.generate --prompt "def add(a, b):" --max-new 32 --kv-dtype float16</pre><button type="button">Copy</button></div>
+    <div class="cmd-title">Chat with cache reuse</div>
+    <div class="cmd"><pre>python -m engine.chat --kv-dtype float16</pre><button type="button">Copy</button></div>
+    <div class="cmd-title">Benchmark against Hugging Face</div>
+    <div class="cmd"><pre>python -m engine.bench --prompt-len 128 --new 128 --kv-dtype float16</pre><button type="button">Copy</button></div>
+    <div class="cmd-title">Check against Hugging Face</div>
+    <div class="cmd"><pre>python -m engine.generate --prompt "def add(a, b):" --max-new 16 --check --kv-dtype float16
+python -m engine.logit_check --kv-dtype float16</pre><button type="button">Copy</button></div>
+    <div class="cmd-title">Tests</div>
+    <div class="cmd"><pre>python tests/test_kv_cache.py
+python tests/test_cache_lifecycle.py
+python tests/test_sampling.py
+python tests/test_followup.py</pre><button type="button">Copy</button></div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">Paged KV-cache inference engine. Built in PyTorch on a 6 GB RTX 4050.</div>
+</footer>
+
+<script>
+/* ============ EDIT THESE ============ */
+const SITE = {
+  // Your repository URL. Every "View the code" / "Open the repository" button uses it.
+  repo: "https://github.com/YOUR-USERNAME/YOUR-REPO",
+
+  // Your demo video. Pick ONE kind:
+  //   kind: "youtube", src: "VIDEO_ID"       (the part after v= in a YouTube link)
+  //   kind: "vimeo",   src: "VIDEO_ID"       (the number in a Vimeo link)
+  //   kind: "file",    src: "demo.mp4", poster: "poster.jpg"   (a file next to this page)
+  //   kind: "none"     shows a placeholder
+  video: { kind: "none", src: "", poster: "" },
+
+  // One line under the video describing what it shows.
+  videoNote: "What you will see: a streamed reply, then a follow-up turn that prefills only the new tokens."
+};
+/* ==================================== */
+
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/* repo links */
+document.querySelectorAll("[data-repo]").forEach(a => {
+  a.href = SITE.repo;
+  a.target = "_blank";
+  a.rel = "noopener";
+});
+
+/* video */
+(function(){
+  const f = document.getElementById("videoFrame");
+  const v = SITE.video;
+  document.getElementById("videoNote").textContent = SITE.videoNote;
+  if (v.kind === "youtube" && v.src) {
+    f.innerHTML = '<iframe src="https://www.youtube-nocookie.com/embed/' + encodeURIComponent(v.src) + '" title="Engine demo video" allow="accelerometer; encrypted-media; picture-in-picture" allowfullscreen loading="lazy"></iframe>';
+  } else if (v.kind === "vimeo" && v.src) {
+    f.innerHTML = '<iframe src="https://player.vimeo.com/video/' + encodeURIComponent(v.src) + '" title="Engine demo video" allow="picture-in-picture" allowfullscreen loading="lazy"></iframe>';
+  } else if (v.kind === "file" && v.src) {
+    const vid = document.createElement("video");
+    vid.controls = true; vid.preload = "metadata"; vid.src = v.src;
+    if (v.poster) vid.poster = v.poster;
+    f.appendChild(vid);
+  } else {
+    f.innerHTML = '<div class="video-empty"><div class="tri" aria-hidden="true"></div><strong>Demo video goes here</strong><span>Set <code>SITE.video</code> at the top of the script in this file.</span></div>';
+  }
+})();
+
+/* hero: pages filling */
+(function(){
+  const N_PAGES = 6, PS = 16, PROMPT = 20, TOTAL = 70;
+  const physical = [4, 0, 5, 2, 7, 1];
+  const pagesEl = document.getElementById("pages");
+  const rowEl = document.getElementById("tableRow");
+  const hTok = document.getElementById("hTok"), hPg = document.getElementById("hPg");
+  let timer = null;
+
+  function build(){
+    pagesEl.innerHTML = ""; rowEl.innerHTML = '<span>block table</span>';
+    for (let p = 0; p < N_PAGES; p++){
+      const d = document.createElement("div");
+      d.className = "page"; d.id = "pg" + p;
+      d.innerHTML = '<div class="page-label"><span>logical ' + p + '</span><span class="pid">free</span></div><div class="slots">' + '<div class="slot"></div>'.repeat(PS) + '</div>';
+      pagesEl.appendChild(d);
+      const c = document.createElement("span");
+      c.className = "cell"; c.id = "bt" + p; c.textContent = "-1";
+      rowEl.appendChild(c);
+    }
+  }
+  function write(i){
+    const p = Math.floor(i / PS), s = i % PS;
+    const pg = document.getElementById("pg" + p);
+    if (!pg.classList.contains("on")){
+      pg.classList.add("on");
+      pg.querySelector(".pid").textContent = "page " + physical[p];
+      const c = document.getElementById("bt" + p);
+      c.classList.add("on"); c.textContent = physical[p];
+    }
+    pg.querySelectorAll(".slot")[s].classList.add(i < PROMPT ? "pre" : "dec");
+    hTok.textContent = i + 1;
+    hPg.textContent = p + 1;
+  }
+  function run(){
+    clearInterval(timer); build(); hTok.textContent = 0; hPg.textContent = 0;
+    if (reduceMotion){ for (let i = 0; i < TOTAL; i++) write(i); return; }
+    let i = 0;
+    // prefill lands almost at once, decode then ticks one token at a time
+    let step = 0;
+    const tick = () => {
+      if (i < PROMPT){ for (let k = 0; k < 4 && i < PROMPT; k++) write(i++); step = 80; }
+      else if (i < TOTAL){ write(i++); step = 140; }
+      else return;
+      timer = setTimeout(tick, step);
+    };
+    timer = setTimeout(tick, 500);
+  }
+  document.getElementById("replay").addEventListener("click", () => { clearTimeout(timer); run(); });
+  run();
+})();
+
+/* architecture */
+(function(){
+  const D = {
+    tok:{t:"Tokenizer",w:"hf",b:"The Hugging Face tokenizer turns the prompt text into token ids. Nothing here is custom. Its output is the <code>input_ids</code> the engine receives."},
+    engine:{t:"PagedQwenEngine.generate",w:"mine",b:"The entry point. It runs prefill on the whole prompt, then a decode loop that feeds each chosen token back in at position <code>seq_len</code>. It stops on end-of-sequence or the token limit and skips the useless forward pass after the final token."},
+    proj:{t:"RMSNorm and q/k/v projections",w:"hf",b:"The input norm and the three projections come straight from the Hugging Face layer, so the weights are the real Qwen weights. The engine only reshapes the outputs into <code>[B, H, T, D]</code>."},
+    rope:{t:"RoPE on q and k",w:"mine",b:"The cos and sin tables come from Hugging Face's rotary module, but applying them to q and k happens here. The cache stores keys <em>after</em> RoPE, so cached keys are never rotated again."},
+    write:{t:"cache.write",w:"mine",b:"Splits the new tokens at page boundaries (<code>pos // page_size</code> picks the page, <code>pos % page_size</code> picks the slot) and allocates pages lazily. Every layer writes at the same cursor, so the sequence length does not move yet."},
+    attn:{t:"paged_attention",w:"mine",b:"Gathers K and V from the pages into one contiguous tensor, expands the 2 KV heads to match the 12 query heads with <code>repeat_kv</code>, then calls PyTorch's scaled dot-product attention. It picks the right causal mask for prefill, decode or a follow-up chunk."},
+    mlp:{t:"Output projection and MLP",w:"hf",b:"The output projection, residual connections, post-attention norm and MLP are Hugging Face layers. Only the attention step in the middle is replaced."},
+    commit:{t:"cache.commit",w:"mine",b:"Runs once per step, after the last layer. It adds the tokens written in this step to <code>seq_len</code>. Until then, <code>gather</code> reads <code>seq_len + pending</code>, so each layer can see the tokens it has just written."},
+    head:{t:"Final norm and LM head",w:"hf",b:"The Hugging Face norm and output head. The engine passes only the last position through the head, which avoids building a <code>[1, T, 151936]</code> logits tensor during prefill."},
+    sample:{t:"sample_next",w:"mine",b:"Applies repetition penalty, temperature, top-k and top-p in that order, then a multinomial draw that can be seeded. A temperature of 0 is greedy argmax, the default, so output is deterministic and comparable with Hugging Face."},
+    stream:{t:"Stream and loop",w:"mine",b:"An <code>on_token</code> callback receives each token id as soon as it is chosen. The streamer decodes all generated ids each time and prints only the new text, holding back broken multi-byte characters."}
+  };
+  const det = document.getElementById("detail");
+  const nodes = document.querySelectorAll(".node");
+  function show(id){
+    const d = D[id];
+    det.innerHTML = '<span class="tag ' + d.w + '">' + (d.w === "mine" ? "written here" : "from Hugging Face") + '</span><h3>' + d.t + '</h3><p>' + d.b + '</p>';
+    nodes.forEach(n => n.setAttribute("aria-pressed", n.dataset.id === id ? "true" : "false"));
+  }
+  nodes.forEach(n => n.addEventListener("click", () => show(n.dataset.id)));
+  show("attn");
+})();
+
+/* memory calculator */
+(function(){
+  const PS = 16, PAGE_KIB_FP16 = 448;
+  const range = document.getElementById("tokRange");
+  const slots = document.getElementById("lastSlots");
+  function fmt(kib){ return kib >= 1024 ? (kib / 1024).toFixed(1) + " MiB" : kib + " KiB"; }
+  function update(){
+    const n = +range.value;
+    const prec = document.querySelector('input[name="prec"]:checked').value;
+    const pages = Math.ceil(n / PS);
+    const kib = pages * (prec === "int8" ? PAGE_KIB_FP16 / 2 : PAGE_KIB_FP16);
+    const used = n % PS === 0 ? PS : n % PS;
+    document.getElementById("tokVal").textContent = n + (n === 1 ? " token" : " tokens");
+    document.getElementById("sPages").textContent = pages;
+    document.getElementById("sMem").textContent = fmt(kib);
+    document.getElementById("sSlots").textContent = PS - used;
+    slots.innerHTML = "";
+    for (let i = 0; i < PS; i++){
+      const s = document.createElement("div");
+      s.className = "slot" + (i < used ? " dec" : "");
+      slots.appendChild(s);
+    }
+  }
+  range.addEventListener("input", update);
+  document.querySelectorAll('input[name="prec"]').forEach(r => r.addEventListener("change", update));
+  update();
+})();
+
+/* benchmark bars */
+(function(){
+  const fills = document.querySelectorAll(".fill");
+  function grow(){ fills.forEach(f => { f.style.width = (f.dataset.v / f.dataset.max * 100) + "%"; }); }
+  if (reduceMotion || !("IntersectionObserver" in window)){ grow(); return; }
+  const io = new IntersectionObserver((es) => {
+    if (es.some(e => e.isIntersecting)){ grow(); io.disconnect(); }
+  }, {threshold:.3});
+  io.observe(document.getElementById("benchmark"));
+})();
+
+/* causal mask pictures: 3 queries, 7 keys */
+(function(){
+  const TQ = 3, S = 7;
+  const bad = document.getElementById("maskBad"), ok = document.getElementById("maskOk");
+  for (let i = 0; i < TQ; i++){
+    for (let j = 0; j < S; j++){
+      const limit = S - TQ + i;
+      const allowed = j <= limit;
+      const b = document.createElement("i");
+      // before the fix: the whole chunk could see all keys, so future keys were visible
+      b.className = allowed ? "ok" : "bad";
+      bad.appendChild(b);
+      const o = document.createElement("i");
+      o.className = allowed ? "ok" : "";
+      ok.appendChild(o);
+    }
+  }
+})();
+
+/* navigation: scroll to sections and mark the current one */
+(function(){
+  const header = document.querySelector("header.top");
+  const nav = document.querySelector("header.top nav");
+  const navLinks = [...nav.querySelectorAll("a")];
+
+  function offsetY(){
+    // header is sticky unless the screen is very short, in which case it scrolls away
+    return getComputedStyle(header).position === "sticky" ? header.offsetHeight : 0;
+  }
+  function targetY(id){
+    if (id === "top") return 0;
+    const sec = document.getElementById(id);
+    if (!sec) return null;
+    const anchor = sec.querySelector("h2") || sec;
+    return Math.max(0, anchor.getBoundingClientRect().top + window.pageYOffset - offsetY() - 24);
+  }
+  function goTo(id, smooth){
+    const y = targetY(id);
+    if (y === null) return false;
+    window.scrollTo({ top: y, behavior: (smooth && !reduceMotion) ? "smooth" : "auto" });
+    return true;
+  }
+
+  document.querySelectorAll('a[href^="#"]').forEach(a => {
+    a.addEventListener("click", e => {
+      const id = a.getAttribute("href").slice(1);
+      if (!id) return;
+      if (goTo(id, true)){
+        e.preventDefault();
+        try { history.replaceState(null, "", "#" + id); } catch (_) {}
+      }
+    });
+  });
+
+  // highlight the section currently in view
+  const ids = navLinks.map(a => a.getAttribute("href").slice(1));
+  const sections = ids.map(id => document.getElementById(id)).filter(Boolean);
+  function setActive(id){
+    navLinks.forEach(a => {
+      const on = a.getAttribute("href") === "#" + id;
+      a.classList.toggle("active", on);
+      if (on){ a.setAttribute("aria-current", "true"); } else { a.removeAttribute("aria-current"); }
+    });
+    const cur = nav.querySelector("a.active");
+    if (cur && nav.scrollWidth > nav.clientWidth){
+      nav.scrollTo({ left: cur.offsetLeft - 16, behavior: reduceMotion ? "auto" : "smooth" });
+    }
+  }
+  function onScroll(){
+    const line = offsetY() + window.innerHeight * 0.35;
+    let current = "";
+    for (const s of sections){
+      if (s.getBoundingClientRect().top <= line) current = s.id;
+    }
+    // at the very bottom, the last section is current even if short
+    if (window.innerHeight + window.pageYOffset >= document.documentElement.scrollHeight - 4 && sections.length){
+      current = sections[sections.length - 1].id;
+    }
+    setActive(current);
+  }
+  let ticking = false;
+  window.addEventListener("scroll", () => {
+    if (!ticking){ ticking = true; requestAnimationFrame(() => { onScroll(); ticking = false; }); }
+  }, { passive: true });
+  window.addEventListener("resize", onScroll);
+  onScroll();
+
+  // opening the page with a #section in the address
+  window.addEventListener("load", () => {
+    const id = location.hash.slice(1);
+    if (id) setTimeout(() => goTo(id, false), 60);
+  });
+})();
+
+/* copy buttons */
+document.querySelectorAll(".cmd button").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    const text = btn.previousElementSibling.textContent;
+    try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; }
+    catch(e){ btn.textContent = "Press Ctrl+C"; }
+    setTimeout(() => btn.textContent = "Copy", 1600);
+  });
+});
+</script>
+</body>
+</html>
